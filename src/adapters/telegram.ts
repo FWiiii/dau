@@ -47,6 +47,7 @@ export class TelegramSavedMessagesClient implements TelegramClient {
         connectionRetries: 5,
       },
     );
+    this.client.setLogLevel("error");
   }
 
   private async ensureConnected(): Promise<void> {
