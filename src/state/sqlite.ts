@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 
 import type { AccountState, StateRepo, StoredMediaRecord } from "../types.js";
 
@@ -13,14 +13,14 @@ function nowIso(): string {
 }
 
 export class SqliteStateRepo implements StateRepo {
-  private readonly db: Database.Database;
+  private readonly db: DatabaseSync;
 
   constructor(options: SqliteStateRepoOptions) {
     const dbDirectory = path.dirname(options.dbPath);
     mkdirSync(dbDirectory, { recursive: true });
-    this.db = new Database(options.dbPath);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("foreign_keys = ON");
+    this.db = new DatabaseSync(options.dbPath);
+    this.db.exec("PRAGMA journal_mode = WAL;");
+    this.db.exec("PRAGMA foreign_keys = ON;");
   }
 
   async init(): Promise<void> {
@@ -169,7 +169,11 @@ export class SqliteStateRepo implements StateRepo {
     const now = Date.now();
     const lockUntil = new Date(now + ttlSeconds * 1000).toISOString();
 
-    const transaction = this.db.transaction(() => {
+    let transactionStarted = false;
+    try {
+      this.db.exec("BEGIN IMMEDIATE;");
+      transactionStarted = true;
+
       const current = this.db
         .prepare(
           "SELECT holder_id, locked_until FROM job_lock WHERE job_name = ?",
@@ -179,6 +183,7 @@ export class SqliteStateRepo implements StateRepo {
         | undefined;
 
       if (current && new Date(current.locked_until).getTime() > now) {
+        this.db.exec("COMMIT;");
         return false;
       }
 
@@ -194,10 +199,14 @@ export class SqliteStateRepo implements StateRepo {
         )
         .run(jobName, lockUntil, holderId);
 
+      this.db.exec("COMMIT;");
       return true;
-    });
-
-    return transaction();
+    } catch (error) {
+      if (transactionStarted) {
+        this.db.exec("ROLLBACK;");
+      }
+      throw error;
+    }
   }
 
   async releaseJobLock(jobName: string, holderId: string): Promise<void> {
