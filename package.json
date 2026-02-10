@@ -1,0 +1,38 @@
+{
+  "name": "x-media-to-telegram",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "sync:run": "node dist/cli.js sync:run",
+    "sync:daemon": "node dist/cli.js sync:daemon",
+    "auth:telegram": "node dist/cli.js auth:telegram",
+    "health:check": "node dist/cli.js health:check",
+    "cookies:check": "node dist/cli.js cookies:check",
+    "dev:sync": "tsx src/cli.ts sync:run",
+    "dev:daemon": "tsx src/cli.ts sync:daemon",
+    "dev:auth": "tsx src/cli.ts auth:telegram",
+    "dev:health": "tsx src/cli.ts health:check",
+    "dev:cookies": "tsx src/cli.ts cookies:check",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.2",
+    "dotenv": "^16.4.7",
+    "pino": "^9.6.0",
+    "telegram": "^2.26.22",
+    "tough-cookie": "^6.0.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.13.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}
