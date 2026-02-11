@@ -27,6 +27,7 @@ class InMemoryStateRepo implements StateRepo {
         latestSeenTweetId: null,
         backfillCursor: null,
         backfillDone: false,
+        rateLimitedUntil: null,
         updatedAt: new Date().toISOString(),
       }
     );
@@ -141,6 +142,7 @@ describe("SyncPipeline", () => {
         maxMediaPerRun: 10,
         downloadTmpDir: "/tmp/work",
         jobLockTtlSeconds: 10,
+        twitterRateLimitCooldownSeconds: 7200,
         maxUploadVideoBytes: 10,
       },
       stateRepo: repo,
@@ -153,4 +155,3 @@ describe("SyncPipeline", () => {
     expect(result.accounts).toHaveLength(0);
   });
 });
-

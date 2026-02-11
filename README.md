@@ -47,6 +47,7 @@ The CLI auto-loads `.env` from project root via `dotenv`, so local runs do not r
 - `BACKFILL_PAGES_PER_RUN=10`
 - `MAX_MEDIA_PER_RUN=300`
 - `DOWNLOAD_TMP_DIR=/tmp/work`
+- `TWITTER_RATE_LIMIT_COOLDOWN_SECONDS=7200`
 
 Quick validate cookies format before health check:
 
@@ -87,4 +88,5 @@ After interactive login, copy printed string into `TELEGRAM_STRING_SESSION`.
 
 - This project uses non-official X scraping via cookies. Keep cookies fresh.
 - Twitter GraphQL query IDs/features can change if X updates internal APIs.
+- If X returns `429`, account sync enters cooldown and resumes automatically.
 - Files are deleted locally after successful upload (or oversize skip handling).

@@ -52,6 +52,7 @@ export interface AccountState {
   latestSeenTweetId: string | null;
   backfillCursor: string | null;
   backfillDone: boolean;
+  rateLimitedUntil: string | null;
   updatedAt: string;
 }
 
@@ -110,6 +111,8 @@ export interface AccountRunSummary {
   incrementalTweetsCandidates: number;
   backfillTweetsCandidates: number;
   backfillDone: boolean;
+  cooldownActive: boolean;
+  cooldownUntil: string | null;
 }
 
 export interface RunSummary {

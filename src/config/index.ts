@@ -20,6 +20,11 @@ const syncEnvSchema = z.object({
   MAX_MEDIA_PER_RUN: z.coerce.number().int().positive().default(300),
   DOWNLOAD_TMP_DIR: z.string().default("/tmp/work"),
   JOB_LOCK_TTL_SECONDS: z.coerce.number().int().positive().default(3300),
+  TWITTER_RATE_LIMIT_COOLDOWN_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(7200),
   MAX_UPLOAD_VIDEO_BYTES: z.coerce
     .number()
     .int()
@@ -63,6 +68,7 @@ export interface AppConfig {
   maxMediaPerRun: number;
   downloadTmpDir: string;
   jobLockTtlSeconds: number;
+  twitterRateLimitCooldownSeconds: number;
   maxUploadVideoBytes: number;
 }
 
@@ -277,6 +283,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     maxMediaPerRun: parsed.MAX_MEDIA_PER_RUN,
     downloadTmpDir: parsed.DOWNLOAD_TMP_DIR,
     jobLockTtlSeconds: parsed.JOB_LOCK_TTL_SECONDS,
+    twitterRateLimitCooldownSeconds: parsed.TWITTER_RATE_LIMIT_COOLDOWN_SECONDS,
     maxUploadVideoBytes: parsed.MAX_UPLOAD_VIDEO_BYTES,
   };
 }

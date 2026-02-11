@@ -30,6 +30,7 @@ export class SqliteStateRepo implements StateRepo {
         latest_seen_tweet_id TEXT,
         backfill_cursor TEXT,
         backfill_done INTEGER NOT NULL DEFAULT 0,
+        rate_limited_until TEXT,
         updated_at TEXT NOT NULL
       );
 
@@ -50,6 +51,21 @@ export class SqliteStateRepo implements StateRepo {
         holder_id TEXT NOT NULL
       );
     `);
+
+    const accountStateColumns = this.db
+      .prepare(
+        "PRAGMA table_info(account_state)",
+      )
+      .all() as Array<{ name: string }>;
+
+    const hasRateLimitedUntil = accountStateColumns.some(
+      (column) => column.name === "rate_limited_until",
+    );
+    if (!hasRateLimitedUntil) {
+      this.db.exec(
+        "ALTER TABLE account_state ADD COLUMN rate_limited_until TEXT;",
+      );
+    }
   }
 
   async getAccountState(username: string): Promise<AccountState> {
@@ -61,6 +77,7 @@ export class SqliteStateRepo implements StateRepo {
           latest_seen_tweet_id,
           backfill_cursor,
           backfill_done,
+          rate_limited_until,
           updated_at
         FROM account_state
         WHERE username = ?
@@ -72,6 +89,7 @@ export class SqliteStateRepo implements StateRepo {
           latest_seen_tweet_id: string | null;
           backfill_cursor: string | null;
           backfill_done: number;
+          rate_limited_until: string | null;
           updated_at: string;
         }
       | undefined;
@@ -82,6 +100,7 @@ export class SqliteStateRepo implements StateRepo {
         latestSeenTweetId: null,
         backfillCursor: null,
         backfillDone: false,
+        rateLimitedUntil: null,
         updatedAt: nowIso(),
       };
     }
@@ -91,6 +110,7 @@ export class SqliteStateRepo implements StateRepo {
       latestSeenTweetId: row.latest_seen_tweet_id,
       backfillCursor: row.backfill_cursor,
       backfillDone: row.backfill_done === 1,
+      rateLimitedUntil: row.rate_limited_until,
       updatedAt: row.updated_at,
     };
   }
@@ -107,12 +127,14 @@ export class SqliteStateRepo implements StateRepo {
           latest_seen_tweet_id,
           backfill_cursor,
           backfill_done,
+          rate_limited_until,
           updated_at
-        ) VALUES (?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(username) DO UPDATE SET
           latest_seen_tweet_id = excluded.latest_seen_tweet_id,
           backfill_cursor = excluded.backfill_cursor,
           backfill_done = excluded.backfill_done,
+          rate_limited_until = excluded.rate_limited_until,
           updated_at = excluded.updated_at
       `,
       )
@@ -121,6 +143,7 @@ export class SqliteStateRepo implements StateRepo {
         state.latestSeenTweetId,
         state.backfillCursor,
         state.backfillDone ? 1 : 0,
+        state.rateLimitedUntil,
         updatedAt,
       );
   }

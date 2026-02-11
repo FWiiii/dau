@@ -1,4 +1,5 @@
 import { logger } from "../logger.js";
+import { TwitterRateLimitError } from "../errors.js";
 import type {
   ListTweetsWithMediaParams,
   ListTweetsWithMediaResult,
@@ -128,6 +129,25 @@ interface GraphqlOperationResult<T> {
 }
 
 type TwitterHost = "twitter.com" | "x.com";
+
+class TwitterGraphqlRequestError extends Error {
+  readonly host: TwitterHost;
+  readonly status: number;
+  readonly apiErrorCode?: number;
+
+  constructor(params: {
+    host: TwitterHost;
+    status: number;
+    message: string;
+    apiErrorCode?: number;
+  }) {
+    super(params.message);
+    this.name = "TwitterGraphqlRequestError";
+    this.host = params.host;
+    this.status = params.status;
+    this.apiErrorCode = params.apiErrorCode;
+  }
+}
 
 const graphqlHosts: TwitterHost[] = ["twitter.com", "x.com"];
 
@@ -577,19 +597,44 @@ function parseTimeline(response: UserTweetsTimelineResponse, username: string): 
   return { tweets, nextCursor };
 }
 
-function extractApiErrorMessage(payload: unknown): string | null {
+function extractApiError(payload: unknown): {
+  message: string | null;
+  code?: number;
+} {
   if (!payload || typeof payload !== "object") {
-    return null;
+    return {
+      message: null,
+    };
   }
 
   const { errors, error } = payload as TwitterApiErrorResponse;
   if (!errors || errors.length === 0) {
-    return error ?? null;
+    return {
+      message: error ?? null,
+    };
   }
 
   const first = errors[0];
   const codePart = typeof first.code === "number" ? ` (code ${first.code})` : "";
-  return `${first.message ?? "Unknown API error"}${codePart}`;
+  return {
+    message: `${first.message ?? "Unknown API error"}${codePart}`,
+    code: first.code,
+  };
+}
+
+function isRateLimitError(
+  error: unknown,
+  messageOverride?: string,
+): boolean {
+  if (error instanceof TwitterGraphqlRequestError) {
+    if (error.status === 429 || error.apiErrorCode === 88) {
+      return true;
+    }
+  }
+
+  const message =
+    messageOverride ?? (error instanceof Error ? error.message : String(error));
+  return /\(429\)|rate limit/i.test(message);
 }
 
 function buildGraphqlUrl(
@@ -724,21 +769,31 @@ export class TwitterScraperClient implements TwitterClient {
     }
 
     if (!response.ok) {
-      const apiMessage = extractApiErrorMessage(payload);
+      const apiError = extractApiError(payload);
       const payloadSnippet =
         typeof payload === "string"
           ? payload.slice(0, 200).replace(/\s+/g, " ").trim()
           : "";
       const detail =
-        apiMessage ?? payloadSnippet ?? `HTTP ${response.status} without JSON error body`;
-      throw new Error(
-        `Twitter GraphQL request failed on ${host} (${response.status}): ${detail}`,
-      );
+        apiError.message ??
+        payloadSnippet ??
+        `HTTP ${response.status} without JSON error body`;
+      throw new TwitterGraphqlRequestError({
+        host,
+        status: response.status,
+        apiErrorCode: apiError.code,
+        message: `Twitter GraphQL request failed on ${host} (${response.status}): ${detail}`,
+      });
     }
 
-    const apiError = extractApiErrorMessage(payload);
-    if (apiError) {
-      throw new Error(`Twitter GraphQL API error on ${host}: ${apiError}`);
+    const apiError = extractApiError(payload);
+    if (apiError.message) {
+      throw new TwitterGraphqlRequestError({
+        host,
+        status: response.status,
+        apiErrorCode: apiError.code,
+        message: `Twitter GraphQL API error on ${host}: ${apiError.message}`,
+      });
     }
 
     return {
@@ -753,9 +808,11 @@ export class TwitterScraperClient implements TwitterClient {
     const errors: string[] = [];
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      const hostOrder = this.getHostOrder();
       let sawAuthFailure = false;
+      const rateLimitedHosts = new Set<TwitterHost>();
 
-      for (const host of this.getHostOrder()) {
+      for (const host of hostOrder) {
         try {
           const result = await this.fetchGraphql<T>(host, buildUrl(host));
           this.preferredHost = host;
@@ -769,7 +826,17 @@ export class TwitterScraperClient implements TwitterClient {
           if (message.includes("(401)") || message.includes("code 32")) {
             sawAuthFailure = true;
           }
+          if (isRateLimitError(error, message)) {
+            rateLimitedHosts.add(host);
+          }
         }
+      }
+
+      if (rateLimitedHosts.size === hostOrder.length) {
+        throw new TwitterRateLimitError(
+          `Twitter GraphQL failed on all hosts: ${errors.join(" | ")}`,
+          [...rateLimitedHosts.values()],
+        );
       }
 
       if (sawAuthFailure && this.rotateAuthCandidate()) {

@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import type { AppConfig } from "../config/index.js";
+import { isTwitterRateLimitError } from "../errors.js";
 import { logger } from "../logger.js";
 import type {
   AccountRunSummary,
@@ -46,6 +47,8 @@ function createAccountSummary(username: string): AccountRunSummary {
     incrementalTweetsCandidates: 0,
     backfillTweetsCandidates: 0,
     backfillDone: false,
+    cooldownActive: false,
+    cooldownUntil: null,
   };
 }
 
@@ -76,8 +79,12 @@ function formatRunReport(summary: RunSummary): string {
   ];
 
   for (const account of summary.accounts) {
+    const cooldownSuffix =
+      account.cooldownActive && account.cooldownUntil
+        ? ` cooldownUntil=${account.cooldownUntil}`
+        : "";
     lines.push(
-      `@${account.username} uploaded=${account.uploaded} skipped=${account.skipped} failed=${account.failed} incremental=${account.incrementalTweetsSelected}/${account.incrementalTweetsCandidates} backfill=${account.backfillTweetsSelected}/${account.backfillTweetsCandidates} backfillDone=${account.backfillDone}`,
+      `@${account.username} uploaded=${account.uploaded} skipped=${account.skipped} failed=${account.failed} incremental=${account.incrementalTweetsSelected}/${account.incrementalTweetsCandidates} backfill=${account.backfillTweetsSelected}/${account.backfillTweetsCandidates} backfillDone=${account.backfillDone}${cooldownSuffix}`,
     );
   }
 
@@ -86,6 +93,12 @@ function formatRunReport(summary: RunSummary): string {
 
 export class SyncPipeline {
   constructor(private readonly deps: SyncPipelineDeps) {}
+
+  private computeCooldownUntil(): string {
+    return new Date(
+      Date.now() + this.deps.config.twitterRateLimitCooldownSeconds * 1000,
+    ).toISOString();
+  }
 
   private async collectIncrementalTweets(
     username: string,
@@ -269,63 +282,112 @@ export class SyncPipeline {
         };
 
         const state = await this.deps.stateRepo.getAccountState(username);
+        const now = Date.now();
+        const rateLimitedUntilTs = state.rateLimitedUntil
+          ? new Date(state.rateLimitedUntil).getTime()
+          : Number.NaN;
 
-        const incremental = await this.collectIncrementalTweets(
-          username,
-          state.latestSeenTweetId,
-        );
-        summary.incrementalTweetsCandidates = incremental.tweets.length;
+        if (Number.isFinite(rateLimitedUntilTs) && rateLimitedUntilTs > now) {
+          summary.cooldownActive = true;
+          summary.cooldownUntil = state.rateLimitedUntil;
+          summary.backfillDone = state.backfillDone;
+          accountSummaries.push(summary);
+          logger.warn(
+            { username, cooldownUntil: state.rateLimitedUntil },
+            "Skipping account because Twitter 429 cooldown is active",
+          );
+          continue;
+        }
 
-        const backfill = state.backfillDone
-          ? {
-              tweets: [] as MediaTweet[],
-              nextCursor: null,
-              backfillDone: true,
+        try {
+          const incremental = await this.collectIncrementalTweets(
+            username,
+            state.latestSeenTweetId,
+          );
+          summary.incrementalTweetsCandidates = incremental.tweets.length;
+
+          const backfill = state.backfillDone
+            ? {
+                tweets: [] as MediaTweet[],
+                nextCursor: null,
+                backfillDone: true,
+              }
+            : await this.collectBackfillTweets(username, state.backfillCursor);
+          summary.backfillTweetsCandidates = backfill.tweets.length;
+          const merged = mergeUniqueTweets([...incremental.tweets, ...backfill.tweets]);
+          const incrementalIds = new Set(incremental.tweets.map((tweet) => tweet.id));
+          const incrementalCandidates = merged.filter((tweet) => incrementalIds.has(tweet.id));
+          const backfillCandidates = merged.filter((tweet) => !incrementalIds.has(tweet.id));
+          const selected: MediaTweet[] = [];
+          let mediaBudget = this.deps.config.maxMediaPerRun;
+
+          for (const tweet of [...incrementalCandidates, ...backfillCandidates]) {
+            if (mediaBudget <= 0) {
+              break;
             }
-          : await this.collectBackfillTweets(username, state.backfillCursor);
-        summary.backfillTweetsCandidates = backfill.tweets.length;
-        const merged = mergeUniqueTweets([...incremental.tweets, ...backfill.tweets]);
-        const incrementalIds = new Set(incremental.tweets.map((tweet) => tweet.id));
-        const incrementalCandidates = merged.filter((tweet) => incrementalIds.has(tweet.id));
-        const backfillCandidates = merged.filter((tweet) => !incrementalIds.has(tweet.id));
-        const selected: MediaTweet[] = [];
-        let mediaBudget = this.deps.config.maxMediaPerRun;
 
-        for (const tweet of [...incrementalCandidates, ...backfillCandidates]) {
-          if (mediaBudget <= 0) {
-            break;
+            const mediaCount = tweet.media.length;
+            if (mediaCount > mediaBudget && selected.length > 0) {
+              continue;
+            }
+
+            selected.push(tweet);
+            mediaBudget -= mediaCount;
           }
 
-          const mediaCount = tweet.media.length;
-          if (mediaCount > mediaBudget && selected.length > 0) {
-            continue;
+          summary.incrementalTweetsSelected = selected.filter((tweet) =>
+            incrementalIds.has(tweet.id),
+          ).length;
+          summary.backfillTweetsSelected =
+            selected.length - summary.incrementalTweetsSelected;
+
+          for (const tweet of selected) {
+            const processed = await this.processTweet(tweet, username);
+            totals.uploaded += processed.uploaded;
+            totals.skipped += processed.skipped;
+            totals.failed += processed.failed;
           }
 
-          selected.push(tweet);
-          mediaBudget -= mediaCount;
+          summary.uploaded = totals.uploaded;
+          summary.skipped = totals.skipped;
+          summary.failed = totals.failed;
+          summary.backfillDone = backfill.backfillDone;
+
+          await this.deps.stateRepo.upsertAccountState({
+            username,
+            latestSeenTweetId: incremental.newestSeenId,
+            backfillCursor: backfill.nextCursor,
+            backfillDone: backfill.backfillDone,
+            rateLimitedUntil: null,
+          });
+        } catch (error) {
+          if (isTwitterRateLimitError(error)) {
+            const cooldownUntil = this.computeCooldownUntil();
+            summary.failed = 1;
+            summary.backfillDone = state.backfillDone;
+            summary.cooldownActive = true;
+            summary.cooldownUntil = cooldownUntil;
+
+            await this.deps.stateRepo.upsertAccountState({
+              username,
+              latestSeenTweetId: state.latestSeenTweetId,
+              backfillCursor: state.backfillCursor,
+              backfillDone: state.backfillDone,
+              rateLimitedUntil: cooldownUntil,
+            });
+
+            logger.warn(
+              {
+                username,
+                cooldownUntil,
+                cooldownSeconds: this.deps.config.twitterRateLimitCooldownSeconds,
+              },
+              "Twitter returned 429, cooldown has been activated",
+            );
+          } else {
+            throw error;
+          }
         }
-
-        summary.incrementalTweetsSelected = selected.filter((tweet) => incrementalIds.has(tweet.id)).length;
-        summary.backfillTweetsSelected = selected.length - summary.incrementalTweetsSelected;
-
-        for (const tweet of selected) {
-          const processed = await this.processTweet(tweet, username);
-          totals.uploaded += processed.uploaded;
-          totals.skipped += processed.skipped;
-          totals.failed += processed.failed;
-        }
-
-        summary.uploaded = totals.uploaded;
-        summary.skipped = totals.skipped;
-        summary.failed = totals.failed;
-        summary.backfillDone = backfill.backfillDone;
-
-        await this.deps.stateRepo.upsertAccountState({
-          username,
-          latestSeenTweetId: incremental.newestSeenId,
-          backfillCursor: backfill.nextCursor,
-          backfillDone: backfill.backfillDone,
-        });
 
         accountSummaries.push(summary);
       }
