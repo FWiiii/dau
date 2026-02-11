@@ -496,6 +496,41 @@ function getTweetResultFromContent(content: unknown): TweetResultRaw | null {
   return result;
 }
 
+function extractBottomCursor(entry: TimelineEntry): string | undefined {
+  const content = entry.content;
+  if (!content) {
+    return undefined;
+  }
+
+  if (content.cursorType === "Bottom" && content.value) {
+    return content.value;
+  }
+
+  const itemContent =
+    content.itemContent && typeof content.itemContent === "object"
+      ? (content.itemContent as { cursorType?: unknown; value?: unknown })
+      : undefined;
+
+  if (
+    itemContent?.cursorType === "Bottom" &&
+    typeof itemContent.value === "string" &&
+    itemContent.value
+  ) {
+    return itemContent.value;
+  }
+
+  if (entry.entryId?.startsWith("cursor-bottom-")) {
+    if (content.value) {
+      return content.value;
+    }
+    if (typeof itemContent?.value === "string" && itemContent.value) {
+      return itemContent.value;
+    }
+  }
+
+  return undefined;
+}
+
 function parseTimeline(response: UserTweetsTimelineResponse, username: string): ParsedTimeline {
   const instructions =
     response.data?.user?.result?.timeline_v2?.timeline?.instructions ?? [];
@@ -510,9 +545,9 @@ function parseTimeline(response: UserTweetsTimelineResponse, username: string): 
         continue;
       }
 
-      if (content.cursorType === "Bottom" && content.value) {
-        nextCursor = content.value;
-        continue;
+      const cursor = extractBottomCursor(entry);
+      if (cursor) {
+        nextCursor = cursor;
       }
 
       const candidates: unknown[] = [];
@@ -820,50 +855,73 @@ export class TwitterScraperClient implements TwitterClient {
     params: ListTweetsWithMediaParams,
   ): Promise<ListTweetsWithMediaResult> {
     const userId = await this.getUserIdByScreenName(params.username);
-    const count = Math.max(20, Math.min(200, params.limitPages * 20));
+    const perPageCount = 20;
+    const maxPages = Math.max(1, params.limitPages);
+    let cursor = params.cursor;
+    const allTweets: MediaTweet[] = [];
+    let hostUsed: TwitterHost | undefined;
 
-    const variables: Record<string, unknown> = {
-      userId,
-      count,
-      includePromotedContent: true,
-      withQuickPromoteEligibilityTweetFields: true,
-      withVoice: true,
-      withV2Timeline: true,
-    };
+    for (let page = 0; page < maxPages; page += 1) {
+      const variables: Record<string, unknown> = {
+        userId,
+        count: perPageCount,
+        includePromotedContent: true,
+        withQuickPromoteEligibilityTweetFields: true,
+        withVoice: true,
+        withV2Timeline: true,
+      };
 
-    if (params.cursor) {
-      variables.cursor = params.cursor;
+      if (cursor) {
+        variables.cursor = cursor;
+      }
+
+      const { payload, host } =
+        await this.executeGraphqlWithFallback<UserTweetsTimelineResponse>((candidateHost) =>
+          buildGraphqlUrl(
+            candidateHost,
+            userTweetsQueryId,
+            "UserTweets",
+            variables,
+            userTweetsFeatures,
+            userTweetsFieldToggles,
+          ),
+        );
+
+      hostUsed = host;
+      const parsed = parseTimeline(payload, params.username);
+      allTweets.push(...parsed.tweets);
+
+      if (!parsed.nextCursor || parsed.nextCursor === cursor) {
+        cursor = parsed.nextCursor;
+        break;
+      }
+
+      cursor = parsed.nextCursor;
     }
 
-    const { payload, host } = await this.executeGraphqlWithFallback<UserTweetsTimelineResponse>(
-      (candidateHost) =>
-        buildGraphqlUrl(
-          candidateHost,
-          userTweetsQueryId,
-          "UserTweets",
-          variables,
-          userTweetsFeatures,
-          userTweetsFieldToggles,
-        ),
+    const dedupedById = new Map<string, MediaTweet>();
+    for (const tweet of allTweets) {
+      dedupedById.set(tweet.id, tweet);
+    }
+    const tweets = [...dedupedById.values()].sort(
+      (left, right) => Number(right.id) - Number(left.id),
     );
-    const parsed = parseTimeline(payload, params.username);
-
-    parsed.tweets.sort((left, right) => Number(right.id) - Number(left.id));
 
     logger.debug(
       {
         username: params.username,
         direction: params.direction,
-        host,
-        fetchedMediaTweets: parsed.tweets.length,
-        nextCursor: parsed.nextCursor,
+        host: hostUsed,
+        requestedPages: maxPages,
+        fetchedMediaTweets: tweets.length,
+        nextCursor: cursor,
       },
       "Fetched tweets with media via GraphQL",
     );
 
     return {
-      tweets: parsed.tweets,
-      nextCursor: params.direction === "older" ? parsed.nextCursor : undefined,
+      tweets,
+      nextCursor: params.direction === "older" ? cursor : undefined,
     };
   }
 }
