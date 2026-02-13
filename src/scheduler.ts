@@ -103,8 +103,17 @@ export async function runSchedulerDaemon(): Promise<void> {
     isRunning = true;
     try {
       const result = await runSyncOnce(`daily-${now.dateKey}`);
-      if (!result.skippedByLock) {
+      const allAccountsCoolingDown =
+        result.accounts.length > 0 &&
+        result.accounts.every((account) => account.cooldownActive);
+
+      if (!result.skippedByLock && !allAccountsCoolingDown) {
         lastRunDateKey = now.dateKey;
+      } else if (allAccountsCoolingDown) {
+        logger.warn(
+          { dateKey: now.dateKey },
+          "All accounts are in cooldown, scheduler will retry on next tick",
+        );
       } else {
         logger.warn(
           { dateKey: now.dateKey },
@@ -133,8 +142,16 @@ export async function runSchedulerDaemon(): Promise<void> {
       const dueToday =
         now.hour > scheduler.dailyAtHour ||
         (now.hour === scheduler.dailyAtHour && now.minute >= scheduler.dailyAtMinute);
-      if (dueToday && !startupResult.skippedByLock) {
+      const allAccountsCoolingDown =
+        startupResult.accounts.length > 0 &&
+        startupResult.accounts.every((account) => account.cooldownActive);
+      if (dueToday && !startupResult.skippedByLock && !allAccountsCoolingDown) {
         lastRunDateKey = now.dateKey;
+      } else if (allAccountsCoolingDown) {
+        logger.warn(
+          { dateKey: now.dateKey },
+          "Startup run found all accounts cooling down, scheduler will retry on next tick",
+        );
       } else if (startupResult.skippedByLock) {
         logger.warn(
           { dateKey: now.dateKey },

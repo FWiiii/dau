@@ -11,5 +11,10 @@ export class TwitterRateLimitError extends Error {
 export function isTwitterRateLimitError(
   error: unknown,
 ): error is TwitterRateLimitError {
-  return error instanceof TwitterRateLimitError;
+  if (error instanceof TwitterRateLimitError) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /\(429\)|rate limit/i.test(message);
 }

@@ -385,7 +385,17 @@ export class SyncPipeline {
               "Twitter returned 429, cooldown has been activated",
             );
           } else {
-            throw error;
+            summary.failed = 1;
+            summary.backfillDone = state.backfillDone;
+
+            logger.error(
+              { err: error, username },
+              "Account sync failed, continue with next account",
+            );
+
+            await this.deps.telegramClient.sendTextMessage(
+              formatFailureReport(error, `account:${username}`),
+            );
           }
         }
 
